@@ -22,13 +22,9 @@ All LLM prompts explicitly instruct the model to strip PII (names, emails, phone
 
 ### 1. Install Ollama
 
+Download and install Ollama from [ollama.com/download](https://ollama.com/download). Once installed, start the server:
+
 ```bash
-# Install via Homebrew
-brew install ollama
-
-# Or download from https://ollama.com/download
-
-# Start the Ollama server
 ollama serve
 ```
 
