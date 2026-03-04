@@ -22,22 +22,12 @@ All LLM prompts explicitly instruct the model to strip PII (names, emails, phone
 
 ### 1. Install Ollama
 
-Download and install Ollama from [ollama.com/download](https://ollama.com/download). Once installed, start the server:
+Download and install Ollama from [ollama.com/download](https://ollama.com/download). Open the app — it runs the server automatically.
+
+Then pull and verify a vision-capable model (the default config uses `qwen3.5:9b`):
 
 ```bash
-ollama serve
-```
-
-Pull a vision-capable model (the default config uses `qwen3.5:9b`):
-
-```bash
-ollama pull qwen3.5:9b
-```
-
-Verify it's available:
-
-```bash
-ollama list
+ollama run qwen3.5:9b
 ```
 
 ### 2. Clone and install dependencies

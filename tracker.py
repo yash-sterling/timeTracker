@@ -70,13 +70,60 @@ Respond ONLY with valid JSON in this exact format (no extra text):
 
 
 # ---------------------------------------------------------------------------
+# Active window detection
+# ---------------------------------------------------------------------------
+
+def get_active_window_id() -> int | None:
+    """Get the CGWindowID of the frontmost application's window."""
+    import Quartz
+
+    try:
+        result = subprocess.run(
+            [
+                "osascript", "-e",
+                'tell application "System Events" to get name of first '
+                'application process whose frontmost is true',
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        frontmost_app = result.stdout.strip()
+        if not frontmost_app:
+            return None
+        log.debug("Frontmost app: %s", frontmost_app)
+    except Exception:
+        log.debug("Could not determine frontmost app")
+        return None
+
+    windows = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly
+        | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID,
+    )
+    for w in windows:
+        if (
+            w.get("kCGWindowOwnerName") == frontmost_app
+            and w.get("kCGWindowLayer", 999) == 0
+            and w.get("kCGWindowBounds", {}).get("Width", 0) > 50
+        ):
+            wid = int(w["kCGWindowNumber"])
+            log.debug("Active window id=%d (%s)", wid, w.get("kCGWindowName", ""))
+            return wid
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Screenshot & encoding
 # ---------------------------------------------------------------------------
 
 def take_screenshot() -> str:
     path = os.path.join(tempfile.gettempdir(), "timetracker_screenshot.png")
-    log.debug("Running screencapture → %s", path)
-    subprocess.run(["screencapture", "-x", path], check=True)
+    window_id = get_active_window_id()
+    if window_id:
+        log.debug("Capturing active window (id=%d)", window_id)
+        subprocess.run(["screencapture", "-x", f"-l{window_id}", path], check=True)
+    else:
+        log.debug("No active window found, falling back to full screen")
+        subprocess.run(["screencapture", "-x", path], check=True)
     size_kb = os.path.getsize(path) / 1024
     log.info("Screenshot saved (%.0f KB)", size_kb)
     return path
