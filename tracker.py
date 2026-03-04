@@ -70,6 +70,19 @@ Respond ONLY with valid JSON in this exact format (no extra text):
 
 
 # ---------------------------------------------------------------------------
+# Input idle detection
+# ---------------------------------------------------------------------------
+
+def seconds_since_last_input() -> float:
+    """Seconds since the last keyboard or mouse event (system-wide)."""
+    import Quartz
+    return Quartz.CGEventSourceSecondsSinceLastEventType(
+        Quartz.kCGEventSourceStateCombinedSessionState,
+        Quartz.kCGAnyInputEventType,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Active window detection
 # ---------------------------------------------------------------------------
 
@@ -449,7 +462,18 @@ def run(once: bool = False):
                 last_calendar_block = current_block
 
             # --- Screenshot + individual summary (every ~2 min) ---
-            entry = capture_screenshot()
+            idle = seconds_since_last_input()
+            log.debug("Idle time: %.0fs (threshold: %ds)", idle, CAPTURE_INTERVAL)
+
+            if idle >= CAPTURE_INTERVAL:
+                log.info("No keyboard/mouse activity for %ds — skipping screenshot", int(idle))
+                entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "subject": "No activity",
+                    "description": "No keyboard or mouse activity detected.",
+                }
+            else:
+                entry = capture_screenshot()
             add_summary(entry)
 
         except KeyboardInterrupt:
