@@ -33,6 +33,7 @@ LOG_FILE = BASE_DIR / "activity_log.jsonl"
 SUMMARIES_FILE = BASE_DIR / "summaries.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
+CONTEXT_PATH = BASE_DIR / "CONTEXT.txt"
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
 logging.basicConfig(
@@ -43,21 +44,28 @@ logging.basicConfig(
 log = logging.getLogger("tracker")
 log.setLevel(logging.DEBUG)
 
-SCREENSHOT_PROMPT = """You are an activity tracker. Look at this screenshot and describe what the user is currently working on.
+SCREENSHOT_PROMPT = """You are an activity tracker. Look at this screenshot and describe in detail what the user is currently working on.
 
-IMPORTANT RULES:
-- Do NOT include any Personally Identifiable Information (PII) such as real names, email addresses, phone numbers, physical addresses, account numbers, API keys, tokens, or passwords.
-- Replace any PII with generic placeholders like [NAME], [EMAIL], [PHONE], etc.
-- Be concise and factual.
+Be as specific as possible:
+- Include application names, website names, document titles, file names, conversation participants, project names, and any other identifying details visible on screen.
+- Describe both the high-level activity (e.g. "messaging a colleague") AND the specific content (e.g. "discussing the deployment timeline for the auth service with [person]").
+- Include relevant details like URLs, channel names, repo names, branch names, error messages, etc.
+- Do NOT redact or anonymize anything — full detail is needed for accurate summarization later.
 
 Respond ONLY with valid JSON in this exact format (no extra text):
-{"subject": "Brief 3-8 word topic", "description": "1-2 sentence description of the activity"}"""
+{"subject": "Brief 3-8 word topic", "description": "2-5 sentence detailed description of the activity"}"""
 
 AGGREGATE_PROMPT_TEMPLATE = """You are an activity tracker. Below are individual activity summaries captured over the last 15 minutes:
 
 {summaries}
+{context_section}
+Based on ALL of these summaries, produce a single overall subject and description for this time block, and classify the focus level.
 
-Based on ALL of these summaries, produce a single overall subject and description for this time block.
+FOCUS CLASSIFICATION:
+- "focused" — the user was primarily doing productive, intentional work (coding, writing, research, meetings, etc.)
+- "low_focus" — a noticeable portion of the time was spent on distracting or non-essential activities such as: social media browsing (Twitter/X, Reddit, Instagram, TikTok, etc.), online shopping (Amazon, eBay, etc.), food delivery apps (DoorDash, UberEats, etc.), casual YouTube/video browsing, news feeds, or similar non-work activities
+
+If even one or two summaries out of the block show distracting activity, classify as "low_focus".
 
 IMPORTANT RULES:
 - Do NOT include any Personally Identifiable Information (PII) such as real names, email addresses, phone numbers, physical addresses, account numbers, API keys, tokens, or passwords.
@@ -66,7 +74,7 @@ IMPORTANT RULES:
 - Be concise and factual.
 
 Respond ONLY with valid JSON in this exact format (no extra text):
-{{"subject": "Brief 3-8 word topic", "description": "1-3 sentence description of overall activity"}}"""
+{{"subject": "Brief 3-8 word topic", "description": "1-3 sentence description of overall activity", "focus": "focused or low_focus"}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +225,27 @@ def describe_screenshot(image_b64: str) -> dict:
     return _parse_json_result(text)
 
 
+def _load_user_context() -> str:
+    """Load optional CONTEXT.txt for the aggregation prompt."""
+    if CONTEXT_PATH.exists():
+        try:
+            text = CONTEXT_PATH.read_text().strip()
+            if text:
+                log.debug("Loaded user context (%d chars)", len(text))
+                return f"\nContext about the user (use this to better interpret the activity):\n{text}\n"
+        except OSError:
+            pass
+    return ""
+
+
 def aggregate_summaries(summaries: list[dict]) -> dict:
     """Text LLM call: list of summaries → overall subject + description."""
     formatted = "\n".join(
         f"- [{s['timestamp']}] {s['subject']}: {s['description']}"
         for s in summaries
     )
-    prompt = AGGREGATE_PROMPT_TEMPLATE.format(summaries=formatted)
+    context_section = _load_user_context()
+    prompt = AGGREGATE_PROMPT_TEMPLATE.format(summaries=formatted, context_section=context_section)
 
     log.info("Sending %d summaries to Ollama for aggregation...", len(summaries))
     start = time.monotonic()
@@ -245,7 +267,14 @@ def aggregate_summaries(summaries: list[dict]) -> dict:
 
     text = _parse_ollama_response(resp.json())
     log.debug("Aggregation raw (%d chars): %s", len(text), text[:300])
-    return _parse_json_result(text)
+    result = _parse_json_result(text)
+    try:
+        parsed = json.loads(text)
+        result["focus"] = parsed.get("focus", "focused")
+    except json.JSONDecodeError:
+        result["focus"] = "focused"
+    log.info("Focus level: %s", result["focus"])
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +486,7 @@ def run(once: bool = False):
                             block_start.strftime("%H:%M"), block_end.strftime("%H:%M"), len(recent),
                         )
                         result = aggregate_summaries(recent)
-                        color_id = None  # default calendar color
+                        color_id = "5" if result.get("focus") == "low_focus" else None  # banana for low focus
 
                     create_calendar_event(
                         service, result["subject"], result["description"],

@@ -1,0 +1,14 @@
+# CONTEXT.txt - Personal context for the activity tracker
+#
+# Copy this file to CONTEXT.txt and fill in your details.
+# This gives the summarization model context about your work so it can
+# produce more accurate and relevant 15-minute calendar summaries.
+#
+# CONTEXT.txt is gitignored — your personal details stay local.
+#
+# Example:
+#
+# I work as a backend engineer at Acme Corp.
+# Our main product is a SaaS analytics platform built with Python and React.
+# I frequently collaborate with the frontend team and the data science team.
+# My current focus is migrating our API from REST to GraphQL.

@@ -1,4 +1,6 @@
 *.json
 *.jsonl
+CONTEXT.txt
+.DS_Store
 env/
 __pycache__/
