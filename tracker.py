@@ -333,7 +333,8 @@ def get_calendar_service():
 
 
 def create_calendar_event(
-    service, subject: str, description: str, start: datetime, end: datetime
+    service, subject: str, description: str, start: datetime, end: datetime,
+    color_id: str | None = None,
 ):
     tz = get_local_timezone()
     event_body = {
@@ -342,6 +343,8 @@ def create_calendar_event(
         "start": {"dateTime": start.isoformat(), "timeZone": tz},
         "end": {"dateTime": end.isoformat(), "timeZone": tz},
     }
+    if color_id:
+        event_body["colorId"] = color_id
     log.info(
         "Creating calendar event: '%s' (%s → %s, tz=%s)",
         subject, start.strftime("%H:%M"), end.strftime("%H:%M"), tz,
@@ -439,14 +442,26 @@ def run(once: bool = False):
                 recent = get_summaries_in_range(block_start, block_end)
 
                 if recent:
-                    log.info(
-                        "=== 15-min boundary (%s → %s) — aggregating %d summaries ===",
-                        block_start.strftime("%H:%M"), block_end.strftime("%H:%M"), len(recent),
-                    )
-                    result = aggregate_summaries(recent)
+                    all_inactive = all(s["subject"] == "No activity" for s in recent)
+
+                    if all_inactive:
+                        log.info(
+                            "=== 15-min boundary (%s → %s) — all %d summaries inactive, skipping LLM ===",
+                            block_start.strftime("%H:%M"), block_end.strftime("%H:%M"), len(recent),
+                        )
+                        result = {"subject": "No activity", "description": "No keyboard or mouse activity detected during this period."}
+                        color_id = "8"  # graphite
+                    else:
+                        log.info(
+                            "=== 15-min boundary (%s → %s) — aggregating %d summaries ===",
+                            block_start.strftime("%H:%M"), block_end.strftime("%H:%M"), len(recent),
+                        )
+                        result = aggregate_summaries(recent)
+                        color_id = None  # default calendar color
+
                     create_calendar_event(
                         service, result["subject"], result["description"],
-                        block_start, block_end,
+                        block_start, block_end, color_id=color_id,
                     )
                     log_entry({
                         "timestamp": datetime.now().isoformat(),
