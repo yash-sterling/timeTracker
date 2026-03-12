@@ -58,9 +58,13 @@ Respond ONLY with valid JSON in this exact format (no extra text):
 AGGREGATE_PROMPT_TEMPLATE = """You are an activity tracker. Below are individual activity summaries captured over the last 15 minutes:
 
 {summaries}
-{context_section}
-Based on ALL of these summaries, produce a single overall subject and description for this time block, and classify the focus level.
 
+Based on ALL of these summaries, do two things:
+
+1. Produce a subject and description summarizing what the user did. Base this ONLY on the activity summaries above — do not incorporate any outside context.
+
+2. Classify the focus level using the context below (if provided) to understand what counts as productive work for this user.
+{context_section}
 FOCUS CLASSIFICATION:
 - "focused" — the user was primarily doing productive, intentional work (coding, writing, research, meetings, etc.)
 - "low_focus" — a noticeable portion of the time was spent on distracting or non-essential activities such as: social media browsing (Twitter/X, Reddit, Instagram, TikTok, etc.), online shopping (Amazon, eBay, etc.), food delivery apps (DoorDash, UberEats, etc.), casual YouTube/video browsing, news feeds, or similar non-work activities
@@ -68,13 +72,14 @@ FOCUS CLASSIFICATION:
 If even one or two summaries out of the block show distracting activity, classify as "low_focus".
 
 IMPORTANT RULES:
+- The subject and description must be based PURELY on the activity summaries. Do NOT reference or incorporate the user context into the subject or description.
 - Do NOT include any Personally Identifiable Information (PII) such as real names, email addresses, phone numbers, physical addresses, account numbers, API keys, tokens, or passwords.
 - Replace any PII with generic placeholders like [NAME], [EMAIL], [PHONE], etc.
 - Synthesize the activities into a coherent summary — don't just list them.
 - Be concise and factual.
 
 Respond ONLY with valid JSON in this exact format (no extra text):
-{{"subject": "Brief 3-8 word topic", "description": "1-3 sentence description of overall activity", "focus": "focused or low_focus"}}"""
+{{"subject": "Brief 3-8 word topic", "description": "1-3 sentence description of overall activity. If focus is low_focus, append a brief explanation of why (e.g. which distracting activities were detected).", "focus": "focused or low_focus"}}"""
 
 
 # ---------------------------------------------------------------------------

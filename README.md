@@ -58,7 +58,11 @@ pip install -r requirements.txt
    - Name: anything you like
 8. Download the JSON file and save it as `credentials.json` in the project directory.
 
-On first run, the script will open your browser to complete the OAuth consent flow. After authorizing, a `token.json` file is saved so you won't need to authorize again (until the token expires).
+9. **Publish the app** so your refresh token doesn't expire after 7 days:
+   - Go to **OAuth consent screen → Audience** and click **Publish App**.
+   - This is safe for a personal tool — it just prevents Google from revoking your token weekly.
+
+On first run, the script will open your browser to complete the OAuth consent flow. After authorizing, a `token.json` file is saved so you won't need to authorize again. If your token does expire, just delete `token.json` and run the script again to re-authorize.
 
 ### 4. Grant screen recording permission
 
