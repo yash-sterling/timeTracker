@@ -4,12 +4,15 @@ Automatic screen activity tracker that runs locally on macOS. Takes a screenshot
 
 ## How it works
 
-Two pipelines run in a single loop:
+Three pipelines run in a single loop:
 
 1. **Every 2 minutes** — takes a screenshot, sends it to a local vision model, and stores a short summary in a rolling buffer (`summaries.json`, last 30 minutes).
-2. **Every 15 minutes** (aligned to :00, :15, :30, :45) — aggregates the individual summaries from the completed block, produces an overall subject + description, and creates a Google Calendar event.
+2. **Every 15 minutes** (aligned to :00, :15, :30, :45) — two LLM calls:
+   - **Calendar event** — PII-stripped summary posted to Google Calendar.
+   - **Detailed log** — hyper-detailed, PII-inclusive narrative appended to `logs/<dd_mm_yyyy>_15m.log`.
+3. **Every 1 hour** (aligned to :00) — aggregates the last four 15-minute detailed summaries into a comprehensive hourly narrative, appended to `logs/<dd_mm_yyyy>_1h.log`. This never goes to the calendar.
 
-All LLM prompts explicitly instruct the model to strip PII (names, emails, phone numbers, etc.) and replace them with placeholders.
+Log files are automatically pruned after 30 days.
 
 ## Prerequisites
 
@@ -107,7 +110,8 @@ OLLAMA_MODEL=qwen3.5:4b TRACKER_CAPTURE_INTERVAL=60 python tracker.py
 | `credentials.json` | Google OAuth client secret (you create this) |
 | `token.json` | Cached OAuth token (auto-generated on first auth) |
 | `summaries.json` | Rolling buffer of individual screenshot summaries (last 30 min) |
-| `activity_log.jsonl` | Append-only log of calendar events created |
+| `logs/<dd_mm_yyyy>_15m.log` | Hyper-detailed 15-minute summaries (PII-inclusive, JSONL) |
+| `logs/<dd_mm_yyyy>_1h.log` | Hourly aggregated summaries (PII-inclusive, JSONL) |
 
 ## Troubleshooting
 

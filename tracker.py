@@ -2,10 +2,12 @@
 """
 Periodic screen activity tracker.
 
-Two pipelines:
+Three pipelines:
   1. Every 2 minutes: screenshot → vision LLM → individual summary (stored in rolling buffer)
-  2. Every 15 minutes (aligned to :00/:15/:30/:45): aggregate recent summaries →
-     text LLM → overall subject + description → Google Calendar event
+  2. Every 15 minutes: two LLM calls:
+     a. PII-stripped summary → Google Calendar event
+     b. Hyper-detailed PII-inclusive summary → logs/<dd_mm_yyyy>_15m.log
+  3. Every 1 hour: detailed 15-min summaries → LLM → hourly narrative → logs/<dd_mm_yyyy>_1h.log
 """
 
 import argparse
@@ -29,7 +31,7 @@ BLOCK_MINUTES = 15
 MAX_SUMMARY_AGE_MINUTES = 30
 
 BASE_DIR = Path(__file__).parent
-LOG_FILE = BASE_DIR / "activity_log.jsonl"
+LOGS_DIR = BASE_DIR / "logs"
 SUMMARIES_FILE = BASE_DIR / "summaries.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
@@ -80,6 +82,36 @@ IMPORTANT RULES:
 
 Respond ONLY with valid JSON in this exact format (no extra text):
 {{"subject": "Brief 3-8 word topic", "description": "1-3 sentence description of overall activity. If focus is low_focus, append a brief explanation of why (e.g. which distracting activities were detected).", "focus": "focused or low_focus"}}"""
+
+DETAILED_SUMMARY_PROMPT_TEMPLATE = """You are an activity tracker producing a detailed private record. Below are individual activity summaries captured over the last 15 minutes:
+
+{summaries}
+
+Produce a hyper-detailed summary of everything the user did. This is a private log — include ALL details:
+- Full names, email addresses, URLs, file paths, repo names, branch names
+- Specific document titles, database table names, record IDs
+- Exact conversation topics, participants, and key points discussed
+- Application names, window titles, specific actions taken
+- Error messages, search queries, commands run
+
+Write in chronological narrative form. Be thorough — nothing should be lost from the individual summaries.
+
+Respond ONLY with valid JSON in this exact format (no extra text):
+{{"summary": "Detailed multi-sentence narrative of everything the user did during this 15-minute block."}}"""
+
+HOURLY_SUMMARY_PROMPT_TEMPLATE = """You are an activity tracker producing a detailed hourly record. Below are the detailed 15-minute summaries from the last hour:
+
+{summaries}
+
+Synthesize these into a single comprehensive hourly summary. This is a private log — preserve ALL details:
+- Full names, URLs, file paths, repo/branch names, record IDs
+- Specific document titles, conversation topics, key decisions
+- Chronological flow of what happened across the hour
+
+Combine related activities and eliminate redundancy, but do NOT drop any meaningful detail.
+
+Respond ONLY with valid JSON in this exact format (no extra text):
+{{"summary": "Detailed multi-sentence narrative of the full hour's activity."}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +314,72 @@ def aggregate_summaries(summaries: list[dict]) -> dict:
     return result
 
 
+def generate_detailed_summary(summaries: list[dict]) -> str:
+    """Text LLM call: list of summaries → hyper-detailed PII-inclusive narrative."""
+    formatted = "\n".join(
+        f"- [{s['timestamp']}] {s['subject']}: {s['description']}"
+        for s in summaries
+    )
+    prompt = DETAILED_SUMMARY_PROMPT_TEMPLATE.format(summaries=formatted)
+
+    log.info("Sending %d summaries for detailed 15-min summary...", len(summaries))
+    start = time.monotonic()
+
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.3, "num_predict": 512},
+        },
+        timeout=120,
+    )
+    elapsed = time.monotonic() - start
+    log.info("Detailed summary LLM responded in %.1fs (HTTP %d)", elapsed, resp.status_code)
+    resp.raise_for_status()
+
+    text = _parse_ollama_response(resp.json())
+    try:
+        return json.loads(text).get("summary", text)
+    except json.JSONDecodeError:
+        return text[:1000]
+
+
+def generate_hourly_summary(fifteen_min_summaries: list[dict]) -> str:
+    """Text LLM call: 15-min detailed summaries → 1-hour narrative."""
+    formatted = "\n\n".join(
+        f"[{s['block_start']} — {s['block_end']}]\n{s['summary']}"
+        for s in fifteen_min_summaries
+    )
+    prompt = HOURLY_SUMMARY_PROMPT_TEMPLATE.format(summaries=formatted)
+
+    log.info("Sending %d blocks for hourly summary...", len(fifteen_min_summaries))
+    start = time.monotonic()
+
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.3, "num_predict": 1024},
+        },
+        timeout=120,
+    )
+    elapsed = time.monotonic() - start
+    log.info("Hourly summary LLM responded in %.1fs (HTTP %d)", elapsed, resp.status_code)
+    resp.raise_for_status()
+
+    text = _parse_ollama_response(resp.json())
+    try:
+        return json.loads(text).get("summary", text)
+    except json.JSONDecodeError:
+        return text[:2000]
+
+
 # ---------------------------------------------------------------------------
 # Rolling summary buffer (summaries.json)
 # ---------------------------------------------------------------------------
@@ -409,14 +507,72 @@ def completed_block_times() -> tuple[datetime, datetime]:
     return block_start, block_end
 
 
+def hour_key(dt: datetime) -> str:
+    """Unique key for a 1-hour block, e.g. '2026-03-03 05:00'."""
+    return dt.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+
+
+def completed_hour_times() -> tuple[datetime, datetime]:
+    """Return (start, end) of the 1-hour block that most recently ended."""
+    now = datetime.now()
+    hour_end = now.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
+    return hour_start, hour_end
+
+
 # ---------------------------------------------------------------------------
-# Activity log (calendar events)
+# Log file I/O (logs/<dd_mm_yyyy>_15m.log and _1h.log)
 # ---------------------------------------------------------------------------
 
-def log_entry(entry: dict):
-    with open(LOG_FILE, "a") as f:
+def _log_file_path(suffix: str, dt: datetime | None = None) -> Path:
+    """Return log file path, e.g. logs/23_03_2026_15m.log"""
+    dt = dt or datetime.now()
+    return LOGS_DIR / f"{dt.strftime('%d_%m_%Y')}_{suffix}.log"
+
+
+def append_to_log(suffix: str, block_start: datetime, block_end: datetime, summary: str):
+    """Append a timestamped summary entry to the given log file."""
+    path = _log_file_path(suffix, block_start)
+    entry = {
+        "block_start": block_start.isoformat(),
+        "block_end": block_end.isoformat(),
+        "timestamp": datetime.now().isoformat(),
+        "summary": summary,
+    }
+    with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    log.debug("Entry written to %s", LOG_FILE)
+    log.debug("Appended entry to %s", path)
+
+
+def read_log_entries(suffix: str, dt: datetime | None = None) -> list[dict]:
+    """Read all entries from a day's log file."""
+    path = _log_file_path(suffix, dt)
+    if not path.exists():
+        return []
+    entries = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return entries
+
+
+def prune_old_logs(max_age_days: int = 30):
+    """Delete log files older than max_age_days."""
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    for path in LOGS_DIR.glob("*.log"):
+        # Parse date from filename: dd_mm_yyyy_suffix.log
+        parts = path.stem.split("_")
+        if len(parts) >= 4:
+            try:
+                file_date = datetime.strptime(f"{parts[0]}_{parts[1]}_{parts[2]}", "%d_%m_%Y")
+                if file_date < cutoff:
+                    path.unlink()
+                    log.info("Pruned old log: %s", path.name)
+            except ValueError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +612,9 @@ def run(once: bool = False):
     log.info("  Capture interval: %ds", CAPTURE_INTERVAL)
     log.info("  Calendar block: %dm", BLOCK_MINUTES)
     log.info("  Summary buffer: last %dm", MAX_SUMMARY_AGE_MINUTES)
-    log.info("  Log file: %s", LOG_FILE)
+    log.info("  Log dir: %s", LOGS_DIR)
+
+    LOGS_DIR.mkdir(exist_ok=True)
 
     if once:
         entry = capture_screenshot()
@@ -465,6 +623,7 @@ def run(once: bool = False):
 
     service = get_calendar_service()
     last_calendar_block = block_key(datetime.now())
+    last_hour_block = hour_key(datetime.now())
     log.info("Starting in block %s — entering main loop", last_calendar_block)
 
     while True:
@@ -485,6 +644,7 @@ def run(once: bool = False):
                         )
                         result = {"subject": "No activity", "description": "No keyboard or mouse activity detected during this period."}
                         color_id = "8"  # graphite
+                        detailed = "No keyboard or mouse activity detected during this period."
                     else:
                         log.info(
                             "=== 15-min boundary (%s → %s) — aggregating %d summaries ===",
@@ -492,19 +652,39 @@ def run(once: bool = False):
                         )
                         result = aggregate_summaries(recent)
                         color_id = "5" if result.get("focus") == "low_focus" else None  # banana for low focus
+                        detailed = generate_detailed_summary(recent)
 
                     create_calendar_event(
                         service, result["subject"], result["description"],
                         block_start, block_end, color_id=color_id,
                     )
-                    log_entry({
-                        "timestamp": datetime.now().isoformat(),
-                        "block_start": block_start.isoformat(),
-                        "block_end": block_end.isoformat(),
-                        "subject": result["subject"],
-                        "description": result["description"],
-                        "source_summaries": len(recent),
-                    })
+                    append_to_log("15m", block_start, block_end, detailed)
+
+                    # --- Check for 1-hour boundary ---
+                    current_hour = hour_key(datetime.now())
+                    if current_hour != last_hour_block:
+                        hour_start, hour_end = completed_hour_times()
+                        entries = read_log_entries("15m", hour_start)
+                        hour_entries = [
+                            e for e in entries
+                            if hour_start.isoformat() <= e["block_start"] < hour_end.isoformat()
+                        ]
+                        if hour_entries:
+                            all_inactive_hour = all(
+                                "No keyboard or mouse activity" in e["summary"]
+                                for e in hour_entries
+                            )
+                            if all_inactive_hour:
+                                hourly = "No keyboard or mouse activity detected during this hour."
+                            else:
+                                hourly = generate_hourly_summary(hour_entries)
+                            append_to_log("1h", hour_start, hour_end, hourly)
+                            log.info(
+                                "=== Hourly summary written (%s → %s) ===",
+                                hour_start.strftime("%H:%M"), hour_end.strftime("%H:%M"),
+                            )
+                        prune_old_logs()
+                        last_hour_block = current_hour
                 else:
                     log.info("15-min boundary crossed but no summaries in block")
 
